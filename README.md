@@ -8,9 +8,15 @@
 <p>Hold a shortcut, speak, and type cleaned-up words into whichever app is in front.</p>
 
 <p>
+  <a href="https://github.com/Tchanwangsa/vox/releases/latest"><img alt="Download for macOS" src="https://img.shields.io/github/v/release/Tchanwangsa/vox?label=Download%20for%20macOS&style=for-the-badge&logo=apple&logoColor=white&labelColor=14161d&color=e05341"></a>&nbsp;
+  <a href="#install"><img alt="Install guide" src="https://img.shields.io/badge/Install_Guide-14161d?style=for-the-badge"></a>
+</p>
+
+<p>
   <a href="https://www.rust-lang.org/"><img alt="Rust" src="https://img.shields.io/badge/rust-000000?style=for-the-badge&logo=rust&logoColor=white"></a>&nbsp;
   <a href="https://www.gpui.rs/"><img alt="GPUI" src="https://img.shields.io/badge/GPUI-084CCF?style=for-the-badge"></a>&nbsp;
-  <img alt="macOS 13+" src="https://img.shields.io/badge/macOS_13+-000000?style=for-the-badge&logo=apple&logoColor=white">
+  <img alt="macOS 13+" src="https://img.shields.io/badge/macOS_13+-000000?style=for-the-badge&logo=apple&logoColor=white">&nbsp;
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-000000?style=for-the-badge"></a>
 </p>
 
 </div>
@@ -90,4 +96,18 @@ App data, models, history, stats, and recordings live in `~/Library/Application 
 | `src/engines/` | Whisper, Cohere, S1-mini, and Groq pipelines, model downloads, and fallback |
 | `src/hotkey.rs`, `src/paste.rs`, `src/keys.rs` | Global shortcuts, pasting into the front app, and Keychain |
 | `src/ui/` | Main window (Home, Stats, Engine, Settings) and floating pill |
-| `scripts/` | App bundle, code signing, and icon generation |
+| `scripts/` | App bundle, code signing, release packaging, and icon generation |
+
+## License & third-party notices
+
+Vox's source code is released under the [MIT License](LICENSE) — feel free to use, copy, modify, and redistribute it.
+
+Model weights are **not** bundled in this repository or in prebuilt releases; Vox downloads them on demand, and each model, runtime, and brand asset remains governed by its own license and terms:
+
+- **OpenAI Whisper** (`whisper.cpp` GGML weights from [`ggerganov/whisper.cpp`](https://huggingface.co/ggerganov/whisper.cpp)) — MIT License
+- **Silero VAD** ([`ggml-org/whisper-vad`](https://huggingface.co/ggml-org/whisper-vad)) — MIT License
+- **Cohere Transcribe** ([`CohereLabs/cohere-transcribe-03-2026`](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026), MLX weights from [`lyzgeorge/cohere-transcribe-03-2026-mlx-4bit`](https://huggingface.co/lyzgeorge/cohere-transcribe-03-2026-mlx-4bit), [`aufklarer/Cohere-Transcribe-2B-MLX-8bit`](https://huggingface.co/aufklarer/Cohere-Transcribe-2B-MLX-8bit), and [`aufklarer/Cohere-Transcribe-2B-MLX-FP16`](https://huggingface.co/aufklarer/Cohere-Transcribe-2B-MLX-FP16)) — Apache 2.0 License
+- **"S1-mini" by "Superwhisper"** ([`superwhisper/s1-mini-GGUF`](https://huggingface.co/superwhisper/s1-mini-GGUF)) — Apache 2.0 License with the Superwhisper naming clause (Vox downloads its `LICENSE` and `NOTICE` files alongside the weights)
+- **Groq API** (`whisper-large-v3-turbo`, `qwen/qwen3.8-27b`) — subject to [Groq's Terms of Use](https://groq.com/terms-of-use/) and each model's license (MIT / Apache 2.0)
+- **Frameworks & runtimes** — [GPUI](https://www.gpui.rs/) (Apache 2.0), [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (MIT), [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT), [MLX](https://github.com/ml-explore/mlx) & [mlx-audio](https://github.com/Blaizzy/mlx-audio) (MIT)
+- **Icons & brand marks** — see [`assets/icons/README.md`](assets/icons/README.md) (Feather MIT, Lucide ISC, Lobe Icons MIT; third-party logos remain the property of their respective owners)
