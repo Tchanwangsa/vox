@@ -74,8 +74,8 @@ pub struct Local {
     pub vad: Option<PathBuf>,
     pub llama_server: Option<PathBuf>,
     pub s1_model: Option<PathBuf>,
-    /// The speech variants on disk: whatever ggml files are there, symlinked
-    /// from Oculus or not, and the Cohere variants installed and verified.
+    /// The speech variants on disk: whatever ggml files are present and the
+    /// Cohere variants installed and verified.
     pub downloaded: Vec<LocalModel>,
 }
 
@@ -106,9 +106,8 @@ impl Local {
     }
 
     /// The variant that answers a dictation. The one chosen, once it is ready;
-    /// until then the last one that was ready, then, as Oculus's
-    /// `pickWhisperModel` does, the default if it is there, else the best on
-    /// disk.
+    /// until then the last one that was ready, then the default if it is there,
+    /// else the best on disk.
     pub fn active(&self, chosen: LocalModel, last_ready: Option<LocalModel>) -> Option<LocalModel> {
         [chosen]
             .into_iter()
@@ -144,8 +143,8 @@ pub fn whisper_path(model: LocalModel) -> PathBuf {
     data_dir().join("models").join("whisper").join(download::whisper_asset(model).file)
 }
 
-/// Remove one downloaded speech model from this Mac. Symlinks (such as from
-/// `scripts/link-oculus.sh`) are unlinked without touching their target.
+/// Remove one downloaded speech model from this Mac. Symlinks are unlinked
+/// without touching their target.
 pub fn remove_model(model: LocalModel) -> Result<(), String> {
     remove_model_in(&data_dir(), model)
 }
@@ -465,7 +464,7 @@ mod tests {
 
         // Symlinked Whisper file is unlinked without removing its target.
         let external = root.join("external-model.bin");
-        std::fs::write(&external, b"oculus-copy").unwrap();
+        std::fs::write(&external, b"external-copy").unwrap();
         let turbo = whisper_dir.join(download::whisper_asset(LocalModel::WhisperLargeV3TurboQ5).file);
         std::os::unix::fs::symlink(&external, &turbo).unwrap();
         remove_model_in(&root, LocalModel::WhisperLargeV3TurboQ5).unwrap();

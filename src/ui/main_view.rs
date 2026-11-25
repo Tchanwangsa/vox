@@ -757,12 +757,18 @@ impl MainView {
             .child(step(t, "Clean up", "S1-mini by Superwhisper", Icon::Superwhisper, status_dot(t, local.can_tidy())).pr(px(32.)));
 
         let whisper_selected = selected.family() == Family::Whisper;
-        let missing_helper =
-            local.llama_server.is_none() || (whisper_selected && local.whisper_cli.is_none());
+        let missing_whisper = whisper_selected && local.whisper_cli.is_none();
+        let missing_llama = local.llama_server.is_none();
+        let helper_hint = match (missing_whisper, missing_llama) {
+            (true, true) => Some("Install whisper-cpp and llama.cpp with Homebrew"),
+            (true, false) => Some("Install whisper-cpp with Homebrew"),
+            (false, true) => Some("Install llama.cpp with Homebrew"),
+            (false, false) => None,
+        };
         if !local.can_tidy() || (whisper_selected && vox.active_model().is_none()) {
             local_body = local_body.child(
                 div().flex().items_center().justify_between()
-                    .children(missing_helper.then(|| small(t, inner - 102., "Set up helpers with scripts/link-oculus.sh".into())))
+                    .children(helper_hint.map(|hint| small(t, inner - 102., hint.into())))
                     .child(button(t, "look-again", "Recheck", false, click(self.act(|vox, cx| vox.look_again(cx))))),
             );
         }

@@ -1,5 +1,5 @@
-//! The speech models Vox can use on this Mac, and how each fits it. The fit
-//! rule is Oculus's (`whisper_models/models.rs`), applied within each family.
+//! The speech models Vox can use on this Mac, and how each fits it, with the
+//! fit rule applied within each family.
 
 use std::sync::OnceLock;
 
@@ -13,8 +13,8 @@ pub struct Spec {
     pub about: &'static str,
     /// The weights' size on Hugging Face.
     pub bytes: u64,
-    /// Roughly what a run holds in memory. Whisper's are Oculus's (whisper.cpp's
-    /// README table). Cohere's are the peak footprint of the runtime's process
+    /// Roughly what a run holds in memory. Whisper's come from whisper.cpp's
+    /// README table. Cohere's are the peak footprint of the runtime's process
     /// transcribing a clip, measured on an Apple silicon Mac, rounded up.
     pub ram_bytes: u64,
 }
