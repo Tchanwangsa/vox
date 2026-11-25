@@ -19,9 +19,10 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 
 pub const REJECTED_KEY: &str = "Groq key rejected";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Error {
     RejectedKey,
+    RateLimited { message: String, reading: Reading },
     Other(String),
 }
 
@@ -29,6 +30,7 @@ impl Error {
     pub fn message(&self) -> &str {
         match self {
             Self::RejectedKey => REJECTED_KEY,
+            Self::RateLimited { message, .. } => message,
             Self::Other(message) => message,
         }
     }
@@ -168,15 +170,22 @@ fn post(
         .set("Content-Type", content_type)
         .timeout(TIMEOUT)
         .send_bytes(body);
-    let response = request(sent)?;
-    let headers: Vec<(String, String)> = response
-        .headers_names()
-        .into_iter()
-        .filter_map(|name| {
-            let value = response.header(&name)?.to_string();
-            Some((name, value))
-        })
-        .collect();
+    let response = match sent {
+        Ok(response) => response,
+        Err(ureq::Error::Status(429, response)) => {
+            let headers = extract_headers(&response);
+            let body = response.into_string().unwrap_or_default();
+            let reading = Reading::from_rate_limit(role, model, &headers, &body, now_ms());
+            let message = reading.rate_limit_message();
+            return Err(Error::RateLimited { message, reading });
+        }
+        Err(ureq::Error::Status(status, _)) => return Err(refusal(status)),
+        Err(e) => {
+            eprintln!("[vox] Groq connection: {e}");
+            return Err(Error::Other("Can't reach Groq. Check your connection.".into()));
+        }
+    };
+    let headers = extract_headers(&response);
     let reading = Reading::from_headers(role, model, &headers, now_ms());
     let value = response
         .into_string()
@@ -184,6 +193,17 @@ fn post(
         .and_then(|text| serde_json::from_str(&text).map_err(|e| e.to_string()))
         .map_err(|_| Error::Other("Couldn't read Groq's response".into()))?;
     Ok((value, reading))
+}
+
+fn extract_headers(response: &ureq::Response) -> Vec<(String, String)> {
+    response
+        .headers_names()
+        .into_iter()
+        .filter_map(|name| {
+            let value = response.header(&name)?.to_string();
+            Some((name, value))
+        })
+        .collect()
 }
 
 fn request(sent: Result<ureq::Response, ureq::Error>) -> Result<ureq::Response, Error> {

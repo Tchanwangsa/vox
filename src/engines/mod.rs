@@ -193,19 +193,21 @@ pub struct Outcome {
     /// Something the speaker should know although the text is good, such as
     /// tidying having failed.
     pub note: Option<String>,
-    /// Rate-limit readings returned by Groq steps in this dictation.
-    pub groq_usage: GroqUsage,
 }
 
 pub struct Dictation {
     pub outcome: Result<Outcome, String>,
     /// A cloud step was refused because Groq no longer accepts the key.
     pub groq_key_rejected: bool,
+    /// Rate-limit readings captured from Groq steps (including `429`s, even
+    /// if the dictation fell back to this Mac or failed).
+    pub groq_usage: GroqUsage,
 }
 
 struct GroqSession {
     key: Option<Result<String, groq::Error>>,
     rejected: bool,
+    usage: GroqUsage,
 }
 
 impl GroqSession {
@@ -217,11 +219,19 @@ impl GroqSession {
             Ok(key) => send(key),
             Err(error) => Err(error.clone()),
         };
-        if matches!(response, Err(groq::Error::RejectedKey)) {
-            self.key = Some(Err(groq::Error::RejectedKey));
-            self.rejected = true;
+        match response {
+            Ok(value) => Ok(value),
+            Err(groq::Error::RejectedKey) => {
+                self.key = Some(Err(groq::Error::RejectedKey));
+                self.rejected = true;
+                Err(groq::REJECTED_KEY.to_string())
+            }
+            Err(groq::Error::RateLimited { message, reading }) => {
+                self.usage.record_reading(reading);
+                Err(message)
+            }
+            Err(error) => Err(error.message().to_string()),
         }
-        response.map_err(|error| error.message().to_string())
     }
 }
 
@@ -292,9 +302,9 @@ pub fn run(
     preload: Option<Preload>,
 ) -> Dictation {
     let key = groq_key_rejected.then_some(Err(groq::Error::RejectedKey));
-    let mut cloud = GroqSession { key, rejected: false };
+    let mut cloud = GroqSession { key, rejected: false, usage: GroqUsage::default() };
     let outcome = run_steps(settings, local, wav, stage, &mut cloud, preload);
-    Dictation { outcome, groq_key_rejected: cloud.rejected }
+    Dictation { outcome, groq_key_rejected: cloud.rejected, groq_usage: cloud.usage }
 }
 
 fn run_steps(
@@ -308,12 +318,11 @@ fn run_steps(
     stage.store(HEARING, Ordering::Relaxed);
     let mut refusals = Vec::new();
     let mut answer = None;
-    let mut groq_usage = GroqUsage::default();
     for avenue in order(settings.avenue, settings.fallback) {
         match hear(avenue, settings, local, wav, cloud, stage, &mut preload) {
             Ok((text, reading)) => {
                 if let Some(reading) = reading {
-                    groq_usage.record_reading(reading);
+                    cloud.usage.record_reading(reading);
                 }
                 answer = Some((avenue, text));
                 break;
@@ -345,7 +354,6 @@ fn run_steps(
             heard_model,
             tidied_by: None,
             note: None,
-            groq_usage,
         });
     }
 
@@ -355,13 +363,13 @@ fn run_steps(
         match tidy(tidier, settings, local, &heard, cloud, stage) {
             Ok((text, reading)) if text.trim().is_empty() => {
                 if let Some(reading) = reading {
-                    groq_usage.record_reading(reading);
+                    cloud.usage.record_reading(reading);
                 }
                 return Err("Only filler heard".into());
             }
             Ok((text, reading)) => {
                 if let Some(reading) = reading {
-                    groq_usage.record_reading(reading);
+                    cloud.usage.record_reading(reading);
                 }
                 return Ok(Outcome {
                     text,
@@ -370,7 +378,6 @@ fn run_steps(
                     heard_model,
                     tidied_by: Some(tidier),
                     note: None,
-                    groq_usage,
                 });
             }
             Err(e) => {
@@ -388,7 +395,6 @@ fn run_steps(
             eprintln!("[vox] Transcript cleanup: {e}");
             "as heard".into()
         }),
-        groq_usage,
     })
 }
 
@@ -398,7 +404,11 @@ mod tests {
 
     #[test]
     fn groq_is_skipped_for_later_steps_after_a_key_rejection() {
-        let mut cloud = GroqSession { key: Some(Ok("gsk_test".into())), rejected: false };
+        let mut cloud = GroqSession {
+            key: Some(Ok("gsk_test".into())),
+            rejected: false,
+            usage: GroqUsage::default(),
+        };
         let result = cloud.request::<()>(|_| Err(groq::Error::Other("temporary".into())));
         assert_eq!(result, Err("temporary".into()));
         assert!(!cloud.rejected);
@@ -407,6 +417,31 @@ mod tests {
         assert_eq!(result, Err(groq::REJECTED_KEY.into()));
         assert!(cloud.rejected);
         assert!(cloud.request::<()>(|_| panic!("should not call Groq again")).is_err());
+    }
+
+    #[test]
+    fn rate_limit_errors_record_their_reading_on_the_session() {
+        let mut cloud = GroqSession {
+            key: Some(Ok("gsk_test".into())),
+            rejected: false,
+            usage: GroqUsage::default(),
+        };
+        let reading = Reading::from_rate_limit(
+            groq_usage::Role::Cleanup,
+            groq::TIDY_MODEL,
+            &[("retry-after".into(), "45".into())],
+            "Rate limit reached on tokens per day (TPD): Limit 500000, Used 500000.",
+            10_000,
+        );
+        let message = reading.rate_limit_message();
+        let result = cloud.request::<()>(|_| {
+            Err(groq::Error::RateLimited { message: message.clone(), reading: reading.clone() })
+        });
+        assert_eq!(result, Err(message));
+        assert!(!cloud.rejected);
+        let row = cloud.usage.row_for(groq_usage::Role::Cleanup, 10_000).unwrap();
+        assert!(row.rate_limited);
+        assert_eq!(row.metric, Some(groq_usage::Metric::TokensPerDay));
     }
 
     fn local(downloaded: &[LocalModel]) -> Local {

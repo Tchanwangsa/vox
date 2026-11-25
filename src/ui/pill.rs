@@ -74,8 +74,12 @@ pub fn show(cx: &mut App) {
 /// GPUI has no switch for any of these. GPUI makes the panel titled, and
 /// macOS draws a hairline along a titled window's top edge, which would
 /// float above the pill: so the panel is made borderless and shadowless.
-/// Ignoring the mouse lets clicks through to whatever the pill's
-/// transparent surround covers.
+/// GPUI's `GPUIPanel` also overrides `canBecomeKeyWindow` to `YES`, so
+/// clicking a hands-free button would otherwise steal key-window focus from
+/// the target app (without activating Vox) and swallow the synthetic ⌘V
+/// paste; `setBecomesKeyOnlyIfNeeded: YES` keeps clicks working while
+/// leaving keyboard focus in the app in front. Ignoring the mouse lets
+/// clicks through to whatever the pill's transparent surround covers.
 #[allow(unexpected_cfgs)] // objc's `sel_impl!` checks a cfg this crate never sets
 fn float_over(window: &Window) {
     use objc::runtime::{Object, NO, YES};
@@ -104,6 +108,7 @@ fn float_over(window: &Window) {
             let _: () = msg_send![panel, setStyleMask: NONACTIVATING_PANEL];
             let _: () = msg_send![panel, setFrame: frame display: YES];
             let _: () = msg_send![panel, setHasShadow: NO];
+            let _: () = msg_send![panel, setBecomesKeyOnlyIfNeeded: YES];
             let _: () = msg_send![panel, setIgnoresMouseEvents: YES];
         }
     }
@@ -483,7 +488,7 @@ fn hands_free_tooltip(control: HandsFreeControl, shortcut: Shortcut) -> impl Int
         )
 }
 
-fn groq_card_row(row: &UsageRow, bar_width: f32, now: u64, show_window: bool) -> Div {
+fn groq_card_row(row: &UsageRow, bar_width: f32, now: u64, show_metric: bool) -> Div {
     let good: Hsla = rgb(0x5bd6a6).into();
     let warn: Hsla = rgb(0xf5b041).into();
     let live: Hsla = rgb(0xff6b57).into();
@@ -502,7 +507,9 @@ fn groq_card_row(row: &UsageRow, bar_width: f32, now: u64, show_window: bool) ->
     } else {
         white(0.94)
     };
-    let fill_width = if row.used == 0 {
+    let fill_width = if row.rate_limited && row.limit == 0 {
+        bar_width
+    } else if row.used == 0 {
         0.0
     } else {
         (bar_width * row.used_fraction()).max(4.0).min(bar_width)
@@ -511,12 +518,36 @@ fn groq_card_row(row: &UsageRow, bar_width: f32, now: u64, show_window: bool) ->
         Role::Transcription => Icon::Mic,
         Role::Cleanup => Icon::Qwen,
     };
-    let left_suffix = if show_window {
-        format!(" left {}", row.window.short_label())
+    let countdown = if row.warn { row.countdown(now) } else { None };
+    let right = if row.rate_limited {
+        let label = match (show_metric, row.metric) {
+            (true, Some(metric)) => format!("{} limit", metric.short_label()),
+            _ => "Rate limited".into(),
+        };
+        div()
+            .flex()
+            .items_baseline()
+            .whitespace_nowrap()
+            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(count_color).child(label))
+            .children(countdown.map(|text| div().text_color(count_color).child(format!(" · {text}"))))
     } else {
-        " left".into()
+        let left_suffix = match (show_metric, row.metric) {
+            (true, Some(metric)) => format!(" {} left", metric.short_label()),
+            _ => " left".into(),
+        };
+        div()
+            .flex()
+            .items_baseline()
+            .whitespace_nowrap()
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(count_color)
+                    .child(grouped_u64(row.remaining)),
+            )
+            .child(div().text_color(white(0.6)).child(left_suffix))
+            .children(countdown.map(|text| div().text_color(count_color).child(format!(" · {text}"))))
     };
-    let reset = if row.warn { row.resets_in(now) } else { None };
 
     div()
         .flex()
@@ -539,22 +570,7 @@ fn groq_card_row(row: &UsageRow, bar_width: f32, now: u64, show_window: bool) ->
                         .child(role_icon.render(12., white(0.65)))
                         .child(row.role.label()),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .items_baseline()
-                        .whitespace_nowrap()
-                        .child(
-                            div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(count_color)
-                                .child(grouped_u64(row.remaining)),
-                        )
-                        .child(div().text_color(white(0.6)).child(left_suffix))
-                        .children(reset.map(|reset| {
-                            div().text_color(count_color).child(format!(" · {reset}"))
-                        })),
-                ),
+                .child(right),
         )
         .child(
             div()
@@ -755,7 +771,8 @@ impl Render for Pill {
                 } else {
                     (Icon::Clipboard, format!("Copied to clipboard{as_heard} · ⌘V to paste"))
                 };
-                let rows: Vec<_> = groq.rows().into_iter().filter(|r| r.warn).collect();
+                let now = now_ms();
+                let rows: Vec<_> = groq.rows_at(now).into_iter().filter(|r| r.warn).collect();
                 if rows.is_empty() {
                     let mut pill = capsule().child(icon.render(16., good)).child(label(said));
                     if *groq_key_rejected {
@@ -773,15 +790,14 @@ impl Render for Pill {
                     }
                     pill
                 } else {
-                    let now = now_ms();
                     let shared = rows
                         .first()
-                        .filter(|first| rows.iter().all(|r| r.window == first.window))
-                        .map(|first| first.window);
+                        .and_then(|first| first.metric)
+                        .filter(|&metric| rows.iter().all(|r| r.metric == Some(metric)));
                     let card_width = 296.0;
                     let bar_width = card_width - 28.0;
                     let groq_label = match shared {
-                        Some(window) => format!("Groq · {}", window.short_label()),
+                        Some(metric) => format!("Groq · {}", metric.short_label()),
                         None => "Groq".into(),
                     };
                     let header_text = if *needs_accessibility {

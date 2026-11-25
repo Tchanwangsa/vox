@@ -7,7 +7,7 @@ use futures::channel::mpsc::{unbounded, UnboundedReceiver};
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
-use crate::config::Shortcut;
+use crate::config::{Shortcut, ShortcutKey, ShortcutModifiers};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Press {
@@ -22,6 +22,8 @@ pub struct Hotkeys {
     talk: HotKey,
     /// False when another app held the shortcut and it could not be taken.
     talk_on: bool,
+    /// True while the user is recording a new custom shortcut in Settings.
+    paused: bool,
     escape: HotKey,
     escape_on: bool,
     enter: HotKey,
@@ -30,13 +32,111 @@ pub struct Hotkeys {
     numpad_enter_on: bool,
 }
 
-fn hotkey(shortcut: Shortcut) -> HotKey {
-    let modifiers = match shortcut {
-        Shortcut::CtrlOptSpace => Modifiers::CONTROL | Modifiers::ALT,
-        Shortcut::OptSpace => Modifiers::ALT,
-        Shortcut::CmdShiftSpace => Modifiers::META | Modifiers::SHIFT,
-    };
-    HotKey::new(Some(modifiers), Code::Space)
+fn modifiers(mods: ShortcutModifiers) -> Option<Modifiers> {
+    let mut out = Modifiers::empty();
+    if mods.control {
+        out |= Modifiers::CONTROL;
+    }
+    if mods.alt {
+        out |= Modifiers::ALT;
+    }
+    if mods.shift {
+        out |= Modifiers::SHIFT;
+    }
+    if mods.command {
+        out |= Modifiers::META;
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn code(key: ShortcutKey) -> Code {
+    match key {
+        ShortcutKey::A => Code::KeyA,
+        ShortcutKey::B => Code::KeyB,
+        ShortcutKey::C => Code::KeyC,
+        ShortcutKey::D => Code::KeyD,
+        ShortcutKey::E => Code::KeyE,
+        ShortcutKey::F => Code::KeyF,
+        ShortcutKey::G => Code::KeyG,
+        ShortcutKey::H => Code::KeyH,
+        ShortcutKey::I => Code::KeyI,
+        ShortcutKey::J => Code::KeyJ,
+        ShortcutKey::K => Code::KeyK,
+        ShortcutKey::L => Code::KeyL,
+        ShortcutKey::M => Code::KeyM,
+        ShortcutKey::N => Code::KeyN,
+        ShortcutKey::O => Code::KeyO,
+        ShortcutKey::P => Code::KeyP,
+        ShortcutKey::Q => Code::KeyQ,
+        ShortcutKey::R => Code::KeyR,
+        ShortcutKey::S => Code::KeyS,
+        ShortcutKey::T => Code::KeyT,
+        ShortcutKey::U => Code::KeyU,
+        ShortcutKey::V => Code::KeyV,
+        ShortcutKey::W => Code::KeyW,
+        ShortcutKey::X => Code::KeyX,
+        ShortcutKey::Y => Code::KeyY,
+        ShortcutKey::Z => Code::KeyZ,
+        ShortcutKey::Digit0 => Code::Digit0,
+        ShortcutKey::Digit1 => Code::Digit1,
+        ShortcutKey::Digit2 => Code::Digit2,
+        ShortcutKey::Digit3 => Code::Digit3,
+        ShortcutKey::Digit4 => Code::Digit4,
+        ShortcutKey::Digit5 => Code::Digit5,
+        ShortcutKey::Digit6 => Code::Digit6,
+        ShortcutKey::Digit7 => Code::Digit7,
+        ShortcutKey::Digit8 => Code::Digit8,
+        ShortcutKey::Digit9 => Code::Digit9,
+        ShortcutKey::Space => Code::Space,
+        ShortcutKey::Tab => Code::Tab,
+        ShortcutKey::Enter => Code::Enter,
+        ShortcutKey::Backspace => Code::Backspace,
+        ShortcutKey::Delete => Code::Delete,
+        ShortcutKey::Escape => Code::Escape,
+        ShortcutKey::ArrowUp => Code::ArrowUp,
+        ShortcutKey::ArrowDown => Code::ArrowDown,
+        ShortcutKey::ArrowLeft => Code::ArrowLeft,
+        ShortcutKey::ArrowRight => Code::ArrowRight,
+        ShortcutKey::Home => Code::Home,
+        ShortcutKey::End => Code::End,
+        ShortcutKey::PageUp => Code::PageUp,
+        ShortcutKey::PageDown => Code::PageDown,
+        ShortcutKey::Backquote => Code::Backquote,
+        ShortcutKey::Minus => Code::Minus,
+        ShortcutKey::Equal => Code::Equal,
+        ShortcutKey::BracketLeft => Code::BracketLeft,
+        ShortcutKey::BracketRight => Code::BracketRight,
+        ShortcutKey::Backslash => Code::Backslash,
+        ShortcutKey::Semicolon => Code::Semicolon,
+        ShortcutKey::Quote => Code::Quote,
+        ShortcutKey::Comma => Code::Comma,
+        ShortcutKey::Period => Code::Period,
+        ShortcutKey::Slash => Code::Slash,
+        ShortcutKey::F1 => Code::F1,
+        ShortcutKey::F2 => Code::F2,
+        ShortcutKey::F3 => Code::F3,
+        ShortcutKey::F4 => Code::F4,
+        ShortcutKey::F5 => Code::F5,
+        ShortcutKey::F6 => Code::F6,
+        ShortcutKey::F7 => Code::F7,
+        ShortcutKey::F8 => Code::F8,
+        ShortcutKey::F9 => Code::F9,
+        ShortcutKey::F10 => Code::F10,
+        ShortcutKey::F11 => Code::F11,
+        ShortcutKey::F12 => Code::F12,
+        ShortcutKey::F13 => Code::F13,
+        ShortcutKey::F14 => Code::F14,
+        ShortcutKey::F15 => Code::F15,
+        ShortcutKey::F16 => Code::F16,
+        ShortcutKey::F17 => Code::F17,
+        ShortcutKey::F18 => Code::F18,
+        ShortcutKey::F19 => Code::F19,
+        ShortcutKey::F20 => Code::F20,
+    }
+}
+
+pub fn hotkey(shortcut: Shortcut) -> HotKey {
+    HotKey::new(modifiers(shortcut.modifiers), code(shortcut.key))
 }
 
 impl Hotkeys {
@@ -54,6 +154,7 @@ impl Hotkeys {
             manager,
             talk,
             talk_on,
+            paused: false,
             escape: HotKey::new(None, Code::Escape),
             escape_on: false,
             enter: HotKey::new(None, Code::Enter),
@@ -68,8 +169,32 @@ impl Hotkeys {
         self.talk_on
     }
 
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Suspend the global talk shortcut while recording a new one, or restore
+    /// it when recording ends.
+    pub fn set_paused(&mut self, paused: bool) {
+        if paused == self.paused {
+            return;
+        }
+        self.paused = paused;
+        if paused {
+            if self.talk_on {
+                self.manager.unregister(self.talk).ok();
+                self.talk_on = false;
+            }
+        } else if !self.talk_on {
+            self.talk_on = self.manager.register(self.talk).is_ok();
+        }
+    }
+
     /// What a raw event means, if it is one of ours.
     pub fn read(&self, (id, pressed): (u32, bool)) -> Option<Press> {
+        if self.paused {
+            return None;
+        }
         if id == self.talk.id() {
             Some(if pressed { Press::Down } else { Press::Up })
         } else if (id == self.enter.id() || id == self.numpad_enter.id()) && pressed {
@@ -83,7 +208,7 @@ impl Hotkeys {
 
     pub fn set_shortcut(&mut self, shortcut: Shortcut) -> Result<(), String> {
         let next = hotkey(shortcut);
-        if next == self.talk && self.talk_on {
+        if !self.paused && next == self.talk && self.talk_on {
             return Ok(());
         }
         self.manager.register(next).map_err(|e| e.to_string())?;
@@ -92,6 +217,7 @@ impl Hotkeys {
         }
         self.talk = next;
         self.talk_on = true;
+        self.paused = false;
         Ok(())
     }
 
@@ -131,6 +257,22 @@ impl Hotkeys {
             if done.is_ok() {
                 self.numpad_enter_on = on;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_shortcut_key_maps_to_a_distinct_hotkey_and_round_trips_tokens() {
+        let mut ids = std::collections::HashSet::new();
+        for key in ShortcutKey::ALL {
+            let parsed = ShortcutKey::from_token(key.token()).expect("token round-trip");
+            assert_eq!(parsed, key);
+            let hk = hotkey(Shortcut::new(ShortcutModifiers::ALT, key));
+            assert!(ids.insert(hk.id()), "duplicate hotkey id for {key:?}");
         }
     }
 }

@@ -10,9 +10,9 @@ use futures::{StreamExt as _, channel::mpsc};
 use gpui::{App, AppContext as _, ClipboardItem, Context, Entity, Global};
 
 use crate::audio::{self, Levels, MicPermission, Recorder};
-use crate::config::{now, Avenue, Entry, Family, History, LocalModel, Settings, Shortcut};
+use crate::config::{Avenue, Entry, Family, History, LocalModel, Settings, Shortcut};
 use crate::engines::download::{Model, Progress, CANCELLED};
-use crate::engines::groq_usage::{now_ms, GroqUsage};
+use crate::engines::groq_usage::{now_ms, DisplaySig, GroqUsage};
 use crate::engines::{self, cohere, groq, Dictation, Local, Outcome};
 use crate::hotkey::{Hotkeys, Press};
 use crate::recordings::{self, Kept, Record};
@@ -89,8 +89,8 @@ pub struct Vox {
     groq_key_revision: u64,
     /// Latest rate-limit readings reported by Groq, persisted for the Engine tab.
     pub groq_usage: GroqUsage,
-    /// Last displayed reset countdowns, to repaint only when a label ticks.
-    last_reset_sig: [Option<String>; 2],
+    /// Last displayed usage signature, to repaint only when counts or timers tick.
+    last_usage_sig: DisplaySig,
     /// A temporary toast for an unsuccessful paste.
     pub key_notice: Option<String>,
     key_attempt: u64,
@@ -203,7 +203,7 @@ impl Vox {
             .collect();
         Self::keep_icons(missing, cx);
         let groq_usage = demo_groq.unwrap_or_else(GroqUsage::load);
-        let last_reset_sig = groq_usage.reset_signature(now_ms());
+        let last_usage_sig = groq_usage.display_signature(now_ms());
         Self {
             settings,
             stats,
@@ -223,7 +223,7 @@ impl Vox {
             checking_groq_key: false,
             groq_key_revision: 0,
             groq_usage,
-            last_reset_sig,
+            last_usage_sig,
             key_notice: None,
             key_attempt: 0,
             can_type: paste::allowed(),
@@ -416,8 +416,16 @@ impl Vox {
         if groq_key_rejected && let GroqKey::Saved(masked) = &self.groq {
             self.groq = GroqKey::Rejected(masked.clone());
             self.groq_usage.clear();
-            self.last_reset_sig = [None, None];
+            self.last_usage_sig = [None, None];
         }
+        let now = now_ms();
+        let groq = if same_key && !groq_key_rejected {
+            let warnings = self.groq_usage.merge_and_take_warnings(&dictation.groq_usage, now);
+            self.last_usage_sig = self.groq_usage.display_signature(now);
+            warnings
+        } else {
+            GroqUsage::default()
+        };
         let outcome = match dictation.outcome {
             Ok(outcome) => outcome,
             Err(e) if groq_key_rejected => {
@@ -449,7 +457,7 @@ impl Vox {
         }
         let target = self.target_app.take();
         let entry = Entry {
-            at: now(),
+            at: now / 1000,
             text: outcome.text,
             heard: outcome.heard,
             avenue: outcome.avenue,
@@ -462,14 +470,7 @@ impl Vox {
             Self::keep_icons(vec![(app.name, app.bundle)], cx);
         }
         self.history.push(entry);
-        let groq = if same_key && !groq_key_rejected {
-            let warnings = self.groq_usage.merge_and_take_warnings(&outcome.groq_usage);
-            self.last_reset_sig = self.groq_usage.reset_signature(now_ms());
-            warnings
-        } else {
-            GroqUsage::default()
-        };
-        let has_groq_bar = !groq.is_empty();
+        let has_groq_bar = !groq.is_empty_at(now);
         let linger = if groq_key_rejected {
             6_000
         } else if needs_accessibility {
@@ -631,13 +632,69 @@ impl Vox {
         match hotkeys.set_shortcut(shortcut) {
             Ok(()) => {
                 self.shortcut_notice = None;
-                self.set(|s| s.shortcut = shortcut, cx);
+                self.set(
+                    |s| {
+                        s.shortcut = shortcut;
+                        if !shortcut.is_preset() {
+                            s.custom_shortcut = Some(shortcut);
+                        }
+                    },
+                    cx,
+                );
             }
             Err(_) => {
+                hotkeys.set_paused(false);
                 self.shortcut_notice =
                     Some("Shortcut in use. Kept your previous one.".into());
                 cx.notify();
             }
+        }
+    }
+
+    /// Pause or resume the global talk shortcut while the user records a new one.
+    pub fn set_shortcut_recording(&mut self, recording: bool, cx: &mut Context<Self>) {
+        if recording && matches!(self.phase, Phase::Listening { .. }) {
+            self.cancel(cx);
+        }
+        let Some(hotkeys) = self.hotkeys.as_mut() else {
+            return;
+        };
+        if hotkeys.is_paused() == recording {
+            return;
+        }
+        hotkeys.set_paused(recording);
+        if !recording {
+            self.shortcut_notice =
+                (!hotkeys.taken()).then(|| "Shortcut in use. Choose another.".into());
+            cx.notify();
+        }
+    }
+
+    /// Try to register a newly recorded shortcut. Leaves the global shortcut
+    /// paused on failure so the user can immediately try another combination.
+    pub fn apply_recorded_shortcut(
+        &mut self,
+        shortcut: Shortcut,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let Some(hotkeys) = self.hotkeys.as_mut() else {
+            return Err("Couldn't register the shortcut".into());
+        };
+        match hotkeys.set_shortcut(shortcut) {
+            Ok(()) => {
+                self.shortcut_notice = None;
+                self.set(
+                    |s| {
+                        s.shortcut = shortcut;
+                        if !shortcut.is_preset() {
+                            s.custom_shortcut = Some(shortcut);
+                        }
+                    },
+                    cx,
+                );
+                Ok(())
+            }
+            Err(_) => Err(format!("{} is in use by another app. Try another.", shortcut.display())),
         }
     }
 
@@ -789,9 +846,9 @@ impl Vox {
             self.mic_permission = mic;
             changed = true;
         }
-        let sig = self.groq_usage.reset_signature(now_ms());
-        if sig != self.last_reset_sig {
-            self.last_reset_sig = sig;
+        let sig = self.groq_usage.display_signature(now_ms());
+        if sig != self.last_usage_sig {
+            self.last_usage_sig = sig;
             changed = true;
         }
         if changed {
@@ -829,7 +886,9 @@ impl Vox {
                         groq::Error::RejectedKey => {
                             "Groq didn’t accept this key. Copy a current key and try again.".to_string()
                         }
-                        groq::Error::Other(message) => message,
+                        groq::Error::RateLimited { message, .. } | groq::Error::Other(message) => {
+                            message
+                        }
                     })?;
                     keys::set_groq(&pasted)?;
                     Ok::<_, String>(keys::masked(&pasted))
@@ -842,7 +901,7 @@ impl Vox {
                         this.groq_key_revision += 1;
                         this.groq = GroqKey::Saved(masked);
                         this.groq_usage.clear();
-                        this.last_reset_sig = [None, None];
+                        this.last_usage_sig = [None, None];
                         if then_use {
                             this.set(|s| s.avenue = Avenue::Cloud, cx);
                         } else {
@@ -887,7 +946,7 @@ impl Vox {
         self.groq_key_revision += 1;
         self.groq = GroqKey::Missing;
         self.groq_usage.clear();
-        self.last_reset_sig = [None, None];
+        self.last_usage_sig = [None, None];
         self.key_notice = None;
         cx.notify();
     }

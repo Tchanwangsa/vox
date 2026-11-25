@@ -6,16 +6,17 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    anchored, AnyElement, canvas, deferred, div, ease_out_quint, point, prelude::*, px, relative,
-    Animation, AnimationExt as _, App, Bounds,
-    ClickEvent, ClipboardItem, Context, Corner, Div, Entity, FocusHandle, FontWeight,
-    KeyDownEvent, MouseButton, PathBuilder, Pixels, SharedString, Stateful, Subscription, Window,
+    anchored, AnyElement, canvas, deferred, div, ease_out_quint, point, prelude::*,
+    pulsating_between, px, relative, Animation, AnimationExt as _, App, Bounds, ClickEvent,
+    ClipboardItem, Context, Corner, Div, Entity, FocusHandle, FontWeight, KeyDownEvent, Keystroke,
+    ModifiersChangedEvent, MouseButton, PathBuilder, Pixels, SharedString, Stateful, Subscription,
+    Window,
 };
 
 use super::icons::Icon;
 use super::{action_button, button, button_with_icon, click, hover_color, hover_transition, keycaps, status_dot, toggle, Theme, SERIF};
 use crate::audio::MicPermission;
-use crate::config::{Avenue, Entry, Family, LocalModel, Shortcut};
+use crate::config::{Avenue, Entry, Family, LocalModel, Shortcut, ShortcutModifiers};
 use crate::engines::download::{Model, Progress};
 use crate::engines::models::{self, Fit, Spec};
 use crate::engines::{cohere};
@@ -65,6 +66,19 @@ pub struct MainView {
     /// Where the menu's trigger was last painted: what the menu hangs from,
     /// and what a click outside the menu does not count as outside.
     trigger_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// Whether Settings is currently capturing a custom shortcut.
+    recording_shortcut: bool,
+    /// Modifiers held right now while recording a custom shortcut.
+    recorded_modifiers: ShortcutModifiers,
+    /// Inline reason a recorded key combination couldn't be used.
+    record_error: Option<String>,
+    /// Focus handle for the custom shortcut recorder row.
+    recorder_focus: FocusHandle,
+    /// Intercepts all keystrokes while recording so app shortcuts don't fire.
+    record_interceptor: Option<Subscription>,
+    /// Cancels recording if the window loses focus.
+    record_activation: Option<Subscription>,
+    _release: Subscription,
     _watch: Subscription,
 }
 
@@ -98,8 +112,14 @@ impl MainView {
             })
             .detach();
         }
+        let _release = cx.on_release(|this: &mut Self, cx| {
+            if this.recording_shortcut {
+                this.vox.update(cx, |vox, cx| vox.set_shortcut_recording(false, cx));
+            }
+        });
         Self {
             _watch: cx.observe(&vox, |_, _, cx| cx.notify()),
+            _release,
             vox,
             // `VOX_TAB` opens a development run on another page.
             tab: match std::env::var("VOX_TAB").as_deref() {
@@ -119,6 +139,12 @@ impl MainView {
             smaller_models: None,
             menu_focus: cx.focus_handle(),
             trigger_bounds: Rc::default(),
+            recording_shortcut: false,
+            recorded_modifiers: ShortcutModifiers::NONE,
+            record_error: None,
+            recorder_focus: cx.focus_handle(),
+            record_interceptor: None,
+            record_activation: None,
         }
     }
 
@@ -133,14 +159,97 @@ impl MainView {
 
     fn go(&self, tab: Tab, cx: &Context<Self>) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
         cx.listener(move |this, _, _, cx| {
+            this.stop_recording_shortcut(cx);
             this.tab = tab;
             cx.notify();
         })
     }
 
     pub fn show_engine(&mut self, cx: &mut Context<Self>) {
+        self.stop_recording_shortcut(cx);
         self.tab = Tab::Engine;
         cx.notify();
+    }
+
+    fn start_recording_shortcut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.recording_shortcut {
+            window.focus(&self.recorder_focus);
+            return;
+        }
+        self.recording_shortcut = true;
+        self.recorded_modifiers = ShortcutModifiers::NONE;
+        self.record_error = None;
+        self.vox.update(cx, |vox, cx| vox.set_shortcut_recording(true, cx));
+        window.focus(&self.recorder_focus);
+
+        let view = cx.weak_entity();
+        self.record_interceptor = Some(cx.intercept_keystrokes(move |event, _, cx| {
+            cx.stop_propagation();
+            view.update(cx, |this, cx| this.on_record_keystroke(&event.keystroke, cx)).ok();
+        }));
+        self.record_activation = Some(cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.stop_recording_shortcut(cx);
+            }
+        }));
+        cx.notify();
+    }
+
+    fn stop_recording_shortcut(&mut self, cx: &mut Context<Self>) {
+        if !self.recording_shortcut {
+            return;
+        }
+        self.recording_shortcut = false;
+        self.recorded_modifiers = ShortcutModifiers::NONE;
+        self.record_error = None;
+        self.record_interceptor = None;
+        self.record_activation = None;
+        self.vox.update(cx, |vox, cx| vox.set_shortcut_recording(false, cx));
+        cx.notify();
+    }
+
+    fn on_record_keystroke(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+        if !self.recording_shortcut {
+            return;
+        }
+        let modifiers = ShortcutModifiers {
+            control: keystroke.modifiers.control,
+            alt: keystroke.modifiers.alt,
+            shift: keystroke.modifiers.shift,
+            command: keystroke.modifiers.platform,
+        };
+        if keystroke.key == "escape" && modifiers.is_empty() {
+            self.stop_recording_shortcut(cx);
+            return;
+        }
+        match Shortcut::from_gpui_keystroke(modifiers, &keystroke.key) {
+            Ok(shortcut) => {
+                let result = self.vox.update(cx, |vox, cx| vox.apply_recorded_shortcut(shortcut, cx));
+                match result {
+                    Ok(()) => {
+                        self.recording_shortcut = false;
+                        self.recorded_modifiers = ShortcutModifiers::NONE;
+                        self.record_error = None;
+                        self.record_interceptor = None;
+                        self.record_activation = None;
+                        cx.notify();
+                    }
+                    Err(message) => {
+                        if self.record_error.as_deref() != Some(message.as_str()) {
+                            self.record_error = Some(message);
+                            cx.notify();
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                let message = error.message();
+                if self.record_error.as_deref() != Some(message) {
+                    self.record_error = Some(message.into());
+                    cx.notify();
+                }
+            }
+        }
     }
 
     fn key_button(
@@ -304,7 +413,7 @@ impl MainView {
             .text_size(px(34.))
             .line_height(relative(1.25))
             .child("Hold")
-            .child(keycaps(t, keys, 17.).font_family(".SystemUIFont"))
+            .child(keycaps(t, &keys, 17.).font_family(".SystemUIFont"))
             .child("and speak.");
 
         let lede = div()
@@ -784,10 +893,10 @@ impl MainView {
         };
         let now = now_ms();
         let transcribe_usage = saved
-            .then(|| vox.groq_usage.row_for(Role::Transcription))
+            .then(|| vox.groq_usage.row_for(Role::Transcription, now))
             .flatten();
         let cleanup_usage = saved
-            .then(|| vox.groq_usage.row_for(Role::Cleanup))
+            .then(|| vox.groq_usage.row_for(Role::Cleanup, now))
             .flatten();
         let mut cloud_steps = div()
             .flex()
@@ -816,7 +925,7 @@ impl MainView {
             cloud_steps = cloud_steps.child(small(
                 t,
                 inner,
-                "Daily usage appears here after your first Groq dictation.".into(),
+                "Usage appears here after your first Groq dictation.".into(),
             ));
         }
         let remove = || button(t, "remove-key", "Remove", false, click(self.act(Vox::remove_key)));
@@ -2109,14 +2218,18 @@ impl MainView {
         let s = &vox.settings;
         let width = self.width;
 
-        let shortcuts = Shortcut::ALL
+        let mut shortcuts: Vec<Div> = Shortcut::PRESETS
             .into_iter()
             .enumerate()
             .map(|(i, shortcut)| {
-                let chosen = s.shortcut == shortcut;
+                let chosen = !self.recording_shortcut && s.shortcut == shortcut;
                 let theme = *t;
                 let id = ("shortcut", i);
-                let select = self.act(move |vox, cx| vox.set_shortcut(shortcut, cx));
+                let select = cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.stop_recording_shortcut(cx);
+                    this.vox.update(cx, |vox, cx| vox.set_shortcut(shortcut, cx));
+                });
+                let keys = shortcut.keys();
                 div().child(hover_transition(id, true, move |hover, press| {
                     let tint = hover_color(theme.sunken.opacity(hover), theme.line, press);
                     div()
@@ -2139,11 +2252,195 @@ impl MainView {
                                 .border_color(if chosen { theme.accent } else { theme.faint })
                                 .when(chosen, |d| d.child(div().size(px(8.)).rounded_full().bg(theme.accent))),
                         )
-                        .child(keycaps(&theme, shortcut.keys(), 12.))
+                        .child(keycaps(&theme, &keys, 12.))
                         .on_click(select)
                 }))
             })
             .collect();
+
+        let custom_shortcut = if !s.shortcut.is_preset() {
+            Some(s.shortcut)
+        } else {
+            s.custom_shortcut
+        };
+        let custom_row = if self.recording_shortcut {
+            let held = self.recorded_modifiers.symbols();
+            let cancel = click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.stop_recording_shortcut(cx);
+            }));
+            let prompt = if !held.is_empty() {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(keycaps(t, &held, 12.))
+                    .child(div().text_size(px(13.)).text_color(t.soft).child("+ key…"))
+            } else {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .text_size(px(13.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(t.ink)
+                            .child("Press a shortcut…"),
+                    )
+                    .child(div().text_size(px(12.5)).text_color(t.faint).child("Esc to cancel"))
+            };
+            div().child(
+                div()
+                    .id("shortcut-custom")
+                    .track_focus(&self.recorder_focus)
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(14.))
+                    .px(px(18.))
+                    .py(px(10.))
+                    .bg(t.notice.opacity(0.65))
+                    .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
+                        let mods = ShortcutModifiers {
+                            control: event.modifiers.control,
+                            alt: event.modifiers.alt,
+                            shift: event.modifiers.shift,
+                            command: event.modifiers.platform,
+                        };
+                        if this.recorded_modifiers != mods {
+                            this.recorded_modifiers = mods;
+                            if !mods.is_empty() {
+                                this.record_error = None;
+                            }
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.stop_recording_shortcut(cx);
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(14.))
+                            .child(
+                                div()
+                                    .size(px(16.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        div()
+                                            .size(px(8.))
+                                            .rounded_full()
+                                            .bg(t.live)
+                                            .with_animation(
+                                                "recording-shortcut",
+                                                Animation::new(Duration::from_millis(900))
+                                                    .repeat()
+                                                    .with_easing(pulsating_between(0.35, 1.)),
+                                                |dot, delta| dot.opacity(delta),
+                                            ),
+                                    ),
+                            )
+                            .child(prompt),
+                    )
+                    .child(
+                        div()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(button(t, "cancel-record-shortcut", "Cancel", false, cancel)),
+                    ),
+            )
+        } else {
+            let chosen = custom_shortcut.is_some_and(|custom| s.shortcut == custom);
+            let theme = *t;
+            let focus_handle = self.recorder_focus.clone();
+            let start_record = click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                cx.stop_propagation();
+                this.start_recording_shortcut(window, cx);
+            }));
+            let row_click = cx.listener(move |this, _: &ClickEvent, window, cx| {
+                if let Some(custom) = custom_shortcut {
+                    if !chosen {
+                        this.vox.update(cx, |vox, cx| vox.set_shortcut(custom, cx));
+                    } else {
+                        this.start_recording_shortcut(window, cx);
+                    }
+                } else {
+                    this.start_recording_shortcut(window, cx);
+                }
+            });
+            let button_label = if custom_shortcut.is_some() { "Change" } else { "Record" };
+            let keys = custom_shortcut.map(Shortcut::keys);
+            div().child(hover_transition("shortcut-custom", true, move |hover, press| {
+                let tint = hover_color(theme.sunken.opacity(hover), theme.line, press);
+                let content = if let Some(keys) = &keys {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(keycaps(&theme, keys, 12.))
+                        .child(div().text_size(px(12.5)).text_color(theme.faint).child("Custom"))
+                } else {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .text_size(px(13.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.ink)
+                                .child("Custom"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .text_color(theme.faint)
+                                .child("Record your own"),
+                        )
+                };
+                div()
+                    .id("shortcut-custom")
+                    .track_focus(&focus_handle)
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(14.))
+                    .px(px(18.))
+                    .py(px(10.))
+                    .bg(tint)
+                    .cursor_pointer()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(14.))
+                            .child(
+                                div()
+                                    .size(px(16.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(if chosen { theme.accent } else { theme.faint })
+                                    .when(chosen, |d| {
+                                        d.child(div().size(px(8.)).rounded_full().bg(theme.accent))
+                                    }),
+                            )
+                            .child(content),
+                    )
+                    .child(
+                        div()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(button(&theme, "record-shortcut", button_label, false, start_record)),
+                    )
+                    .on_click(row_click)
+            }))
+        };
+        shortcuts.push(custom_row);
 
         let (typing, keep) = (s.type_into_app, s.keep_clipboard);
         let (can_type, mic_permission) = (vox.can_type, vox.mic_permission);
@@ -2153,7 +2450,7 @@ impl MainView {
             .child(heading(t, "Settings", ""))
             .child(section(t, Icon::Key, "Shortcut", "Hold to talk, or tap for hands-free."))
             .child(group(t, shortcuts).overflow_hidden());
-        if let Some(why) = &vox.shortcut_notice {
+        if let Some(why) = self.record_error.as_ref().or(vox.shortcut_notice.as_ref()) {
             page = page.child(notice(t, width, why.clone(), None));
         }
         page.child(section(t, Icon::Clipboard, "Typing", ""))
@@ -2453,12 +2750,57 @@ fn groq_usage_bar(t: &Theme, inner: f32, row: &UsageRow, now: u64) -> Div {
     } else {
         t.ink
     };
-    let fill_width = if row.used == 0 {
+    let fill_width = if row.rate_limited && row.limit == 0 {
+        bar_width
+    } else if row.used == 0 {
         0.0
     } else {
         (bar_width * row.used_fraction()).max(4.0).min(bar_width)
     };
-    let reset = row.resets_in(now);
+    let countdown = row.countdown(now);
+    let left_text = if row.limit > 0 {
+        match row.metric {
+            Some(metric) => format!(
+                "{} of {} {}",
+                grouped_u64(row.used),
+                grouped_u64(row.limit),
+                metric.unit_label()
+            ),
+            None => format!("{} of {} used", grouped_u64(row.used), grouped_u64(row.limit)),
+        }
+    } else {
+        match row.metric {
+            Some(metric) => format!("Limit reached ({})", metric.unit_label()),
+            None => "Rate limit reached".into(),
+        }
+    };
+    let right = if row.rate_limited {
+        div()
+            .flex()
+            .items_baseline()
+            .whitespace_nowrap()
+            .child(div().font_weight(FontWeight::MEDIUM).text_color(count_color).child("Rate limited"))
+            .children(countdown.map(|text| {
+                div().text_color(count_color).child(format!(" · {text}"))
+            }))
+    } else {
+        div()
+            .flex()
+            .items_baseline()
+            .whitespace_nowrap()
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(count_color)
+                    .child(grouped_u64(row.remaining)),
+            )
+            .child(div().text_color(t.soft).child(" left"))
+            .children(countdown.map(|text| {
+                div()
+                    .text_color(if row.warn { count_color } else { t.faint })
+                    .child(format!(" · {text}"))
+            }))
+    };
 
     div()
         .pl(px(indent))
@@ -2481,38 +2823,8 @@ fn groq_usage_bar(t: &Theme, inner: f32, row: &UsageRow, now: u64) -> Div {
                 .justify_between()
                 .gap(px(8.))
                 .text_size(px(12.))
-                .child(
-                    div()
-                        .text_color(t.soft)
-                        .whitespace_nowrap()
-                        .child(format!(
-                            "{} of {} used",
-                            grouped_u64(row.used),
-                            grouped_u64(row.limit)
-                        )),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_baseline()
-                        .whitespace_nowrap()
-                        .child(
-                            div()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(count_color)
-                                .child(grouped_u64(row.remaining)),
-                        )
-                        .child(
-                            div()
-                                .text_color(t.soft)
-                                .child(format!(" left {}", row.window.label())),
-                        )
-                        .children(reset.map(|reset| {
-                            div()
-                                .text_color(if row.warn { count_color } else { t.faint })
-                                .child(format!(" · {reset}"))
-                        })),
-                ),
+                .child(div().text_color(t.soft).whitespace_nowrap().child(left_text))
+                .child(right),
         )
 }
 

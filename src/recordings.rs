@@ -153,7 +153,6 @@ mod tests {
             heard_model: groq::HEAR_MODEL.into(),
             tidied_by: Some(Avenue::Local),
             note: None,
-            groq_usage: Default::default(),
         };
         let local = Local {
             s1_model: Some("/models/s1-mini-q4_k_m.gguf".into()),
