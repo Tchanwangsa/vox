@@ -17,7 +17,7 @@ IDENTITY="${VOX_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev
 
 case "$TARGET" in
   *.app|*.app/)
-    if [ -n "$IDENTITY" ] && codesign --force --sign "$IDENTITY" "$TARGET" 2>/dev/null; then
+    if [ -n "$IDENTITY" ] && codesign --force --timestamp=none --sign "$IDENTITY" "$TARGET"; then
       [ "$QUIET" -eq 0 ] && echo "signed with $IDENTITY"
     else
       codesign --force --sign - "$TARGET"
@@ -25,7 +25,7 @@ case "$TARGET" in
     fi
     ;;
   *)
-    if [ -n "$IDENTITY" ] && codesign --force --sign "$IDENTITY" --identifier com.tchan.vox "$TARGET" 2>/dev/null; then
+    if [ -n "$IDENTITY" ] && codesign --force --timestamp=none --sign "$IDENTITY" --identifier com.tchan.vox "$TARGET"; then
       [ "$QUIET" -eq 0 ] && echo "signed with $IDENTITY"
     elif [ "$QUIET" -eq 0 ]; then
       echo "no signing identity found; left $TARGET ad hoc" >&2

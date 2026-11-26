@@ -1,10 +1,12 @@
 //! A one-shot speech helper that can load its model before it receives audio.
 
 use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
+use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use super::{HEARING, LOADING_SPEECH};
 
@@ -24,6 +26,7 @@ pub(super) struct Process {
 impl Process {
     pub(super) fn start(command: &mut Command, ready: fn(&[u8]) -> bool) -> io::Result<Self> {
         let mut child = command
+            .process_group(0)
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
@@ -62,7 +65,15 @@ impl Process {
         })
     }
 
-    pub(super) fn transcribe(mut self, wav: &[u8], stage: &Arc<AtomicU8>) -> io::Result<Output> {
+    pub(super) fn transcribe(
+        mut self,
+        wav: &[u8],
+        stage: &Arc<AtomicU8>,
+        cancel: &AtomicBool,
+    ) -> io::Result<Output> {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
         {
             let mut startup = self.startup.lock().unwrap();
             if !matches!(*startup, Startup::Ready) {
@@ -71,12 +82,38 @@ impl Process {
             }
         }
         let mut child = self.child.take().expect("speech helper");
-        // Closing stdin tells the helper that the recording is complete.
-        let sent = child.stdin.take().expect("piped stdin").write_all(wav);
-        let result = child.wait();
+        // Write WAV on a helper thread so cancellation can kill the child even
+        // while the model is still loading and hasn't begun reading stdin yet.
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let wav = wav.to_vec();
+        let writer = thread::spawn(move || {
+            let result = stdin.write_all(&wav);
+            drop(stdin);
+            result
+        });
+        let status = loop {
+            if cancel.load(Ordering::Relaxed) {
+                kill_group(&mut child);
+                writer.join().ok();
+                if let Some(log) = self.log.take() {
+                    log.join().ok();
+                }
+                if let Some(stdout) = self.stdout.take() {
+                    stdout.join().ok();
+                }
+                stage.store(HEARING, Ordering::Relaxed);
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            }
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            thread::sleep(Duration::from_millis(25));
+        };
+        let sent = writer
+            .join()
+            .map_err(|_| io::Error::other("speech input writer failed"))?;
         let stderr = self.log.take().unwrap().join().unwrap_or_default();
         stage.store(HEARING, Ordering::Relaxed);
-        let status = result?;
         if status.success() && !matches!(sent, Err(ref e) if e.kind() == io::ErrorKind::BrokenPipe)
         {
             sent?;
@@ -99,12 +136,17 @@ impl Process {
     }
 }
 
+fn kill_group(child: &mut Child) {
+    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+    child.kill().ok();
+    child.wait().ok();
+}
+
 impl Drop for Process {
     fn drop(&mut self) {
         // A cancelled or very short recording never sends audio.
         if let Some(mut child) = self.child.take() {
-            child.kill().ok();
-            child.wait().ok();
+            kill_group(&mut child);
         }
         if let Some(log) = self.log.take() {
             log.join().ok();
@@ -135,9 +177,31 @@ mod tests {
         }
 
         let stage = Arc::new(AtomicU8::new(HEARING));
-        let output = helper.transcribe(b"audio", &stage).unwrap();
+        let cancel = AtomicBool::new(false);
+        let output = helper.transcribe(b"audio", &stage, &cancel).unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"audio");
         assert_eq!(stage.load(Ordering::Relaxed), HEARING);
+    }
+
+    #[test]
+    fn cancelling_transcription_stops_the_helper_promptly() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "printf 'ready\n' >&2; /bin/sleep 5"])
+            .stdout(Stdio::piped());
+        let helper = Process::start(&mut command, |line| line == b"ready\n").unwrap();
+        let stage = Arc::new(AtomicU8::new(HEARING));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        let trigger = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(80));
+            flag.store(true, Ordering::Relaxed);
+        });
+        let started = Instant::now();
+        let err = helper.transcribe(b"audio", &stage, &cancel).unwrap_err();
+        trigger.join().unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

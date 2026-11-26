@@ -1,0 +1,22 @@
+{
+  "name": "vox-site",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@solidjs/web": "^2.0.3",
+    "solid-js": "^2.0.3"
+  },
+  "devDependencies": {
+    "@babel/core": "^8.1.3",
+    "@solidjs/babel-plugin": "^2.0.2",
+    "@solidjs/vite-plugin": "^3.0.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  }
+}

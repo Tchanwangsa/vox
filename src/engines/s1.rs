@@ -16,7 +16,7 @@ use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -70,13 +70,19 @@ pub fn tidy(
     transcript: &str,
     language: &str,
     stage: &AtomicU8,
+    cancel: &AtomicBool,
 ) -> Result<String, String> {
     if !english(transcript, language) {
         return Ok(transcript.to_string());
     }
     let cleaned = chunks(transcript, CHUNK_TOKENS)
         .iter()
-        .map(|piece| complete(launch, &request(piece), stage).and_then(|value| reply(&value)))
+        .map(|piece| {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("Cancelled".into());
+            }
+            complete(launch, &request(piece), stage, cancel).and_then(|value| reply(&value))
+        })
         .collect::<Result<Vec<_>, String>>()?;
     Ok(join(&cleaned))
 }
@@ -95,9 +101,21 @@ pub fn stop() {
     }
 }
 
-fn complete(launch: &Launch, body: &Value, stage: &AtomicU8) -> Result<Value, String> {
+fn complete(
+    launch: &Launch,
+    body: &Value,
+    stage: &AtomicU8,
+    cancel: &AtomicBool,
+) -> Result<Value, String> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Cancelled".into());
+    }
     stage.store(LOADING_TIDY, Ordering::Relaxed);
     let port = acquire(launch)?;
+    if cancel.load(Ordering::Relaxed) {
+        release();
+        return Err("Cancelled".into());
+    }
     stage.store(TIDYING, Ordering::Relaxed);
     let sent = ureq::post(&format!("http://127.0.0.1:{port}/v1/chat/completions"))
         .set("Content-Type", "application/json")

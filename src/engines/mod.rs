@@ -13,7 +13,7 @@ pub mod whisper;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::thread::{self, JoinHandle};
 
 use crate::config::{data_dir, Avenue, Family, LocalModel, Settings};
@@ -42,10 +42,10 @@ impl Speech {
         }
     }
 
-    fn hear(self, wav: &[u8], stage: &Arc<AtomicU8>) -> Result<String, String> {
+    fn hear(self, wav: &[u8], stage: &Arc<AtomicU8>, cancel: &AtomicBool) -> Result<String, String> {
         match self {
-            Self::Whisper(request) => request.hear(wav, stage),
-            Self::Cohere(process) => cohere::hear(process, wav, stage),
+            Self::Whisper(request) => request.hear(wav, stage, cancel),
+            Self::Cohere(process) => cohere::hear(process, wav, stage, cancel),
         }
     }
 }
@@ -242,6 +242,7 @@ fn hear(
     wav: &[u8],
     cloud: &mut GroqSession,
     stage: &Arc<AtomicU8>,
+    cancel: &AtomicBool,
     preload: &mut Option<Preload>,
 ) -> Result<(String, Option<Reading>), String> {
     match avenue {
@@ -259,7 +260,7 @@ fn hear(
                 }
                 _ => Speech::start(model, local, &settings.language)?,
             };
-            speech.hear(wav, stage).map(|text| (text, None))
+            speech.hear(wav, stage, cancel).map(|text| (text, None))
         }
     }
 }
@@ -271,12 +272,13 @@ fn tidy(
     heard: &str,
     cloud: &mut GroqSession,
     stage: &AtomicU8,
+    cancel: &AtomicBool,
 ) -> Result<(String, Option<Reading>), String> {
     match avenue {
         Avenue::Cloud => cloud.request(|key| groq::tidy(key, heard)),
         Avenue::Local => {
             let launch = local.s1().ok_or("S1-mini is not on this Mac")?;
-            s1::tidy(&launch, heard, &settings.language, stage).map(|text| (text, None))
+            s1::tidy(&launch, heard, &settings.language, stage, cancel).map(|text| (text, None))
         }
     }
 }
@@ -298,12 +300,13 @@ pub fn run(
     local: &Local,
     wav: &[u8],
     stage: &Arc<AtomicU8>,
+    cancel: &AtomicBool,
     groq_key_rejected: bool,
     preload: Option<Preload>,
 ) -> Dictation {
     let key = groq_key_rejected.then_some(Err(groq::Error::RejectedKey));
     let mut cloud = GroqSession { key, rejected: false, usage: GroqUsage::default() };
-    let outcome = run_steps(settings, local, wav, stage, &mut cloud, preload);
+    let outcome = run_steps(settings, local, wav, stage, cancel, &mut cloud, preload);
     Dictation { outcome, groq_key_rejected: cloud.rejected, groq_usage: cloud.usage }
 }
 
@@ -312,6 +315,7 @@ fn run_steps(
     local: &Local,
     wav: &[u8],
     stage: &Arc<AtomicU8>,
+    cancel: &AtomicBool,
     cloud: &mut GroqSession,
     mut preload: Option<Preload>,
 ) -> Result<Outcome, String> {
@@ -319,7 +323,10 @@ fn run_steps(
     let mut refusals = Vec::new();
     let mut answer = None;
     for avenue in order(settings.avenue, settings.fallback) {
-        match hear(avenue, settings, local, wav, cloud, stage, &mut preload) {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Cancelled".into());
+        }
+        match hear(avenue, settings, local, wav, cloud, stage, cancel, &mut preload) {
             Ok((text, reading)) => {
                 if let Some(reading) = reading {
                     cloud.usage.record_reading(reading);
@@ -327,10 +334,18 @@ fn run_steps(
                 answer = Some((avenue, text));
                 break;
             }
-            Err(e) => refusals.push(e),
+            Err(e) => {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err("Cancelled".into());
+                }
+                refusals.push(e);
+            }
         }
     }
     drop(preload);
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Cancelled".into());
+    }
     // The chosen avenue's reason is the one worth reading.
     let (avenue, heard) = answer.ok_or_else(|| refusals.remove(0))?;
     let heard_model = match (avenue, local.active(settings.local_model, settings.last_ready_model)) {
@@ -359,8 +374,11 @@ fn run_steps(
 
     let mut failure = None;
     for tidier in order(avenue, settings.fallback) {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Cancelled".into());
+        }
         stage.store(TIDYING, Ordering::Relaxed);
-        match tidy(tidier, settings, local, &heard, cloud, stage) {
+        match tidy(tidier, settings, local, &heard, cloud, stage, cancel) {
             Ok((text, reading)) if text.trim().is_empty() => {
                 if let Some(reading) = reading {
                     cloud.usage.record_reading(reading);
@@ -381,6 +399,9 @@ fn run_steps(
                 });
             }
             Err(e) => {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err("Cancelled".into());
+                }
                 failure.get_or_insert(e);
             }
         }

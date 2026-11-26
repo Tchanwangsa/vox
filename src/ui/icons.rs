@@ -7,6 +7,7 @@ use gpui::{AssetSource, Div, Hsla, SharedString, Styled as _, div, prelude::*, p
 pub enum Icon {
     Home,
     Layers,
+    Apps,
     Settings,
     Monitor,
     Check,
@@ -41,6 +42,7 @@ impl Icon {
         let (path, color) = match self {
             Self::Home => ("home.svg", ink),
             Self::Layers => ("layers.svg", ink),
+            Self::Apps => ("apps.svg", ink),
             Self::Settings => ("settings.svg", ink),
             Self::Monitor => ("monitor.svg", ink),
             Self::Check => ("check.svg", ink),
@@ -87,6 +89,7 @@ macro_rules! assets {
 assets![
     "home.svg",
     "layers.svg",
+    "apps.svg",
     "settings.svg",
     "monitor.svg",
     "check.svg",

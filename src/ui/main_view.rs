@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use gpui::{
     anchored, AnyElement, canvas, deferred, div, ease_out_quint, point, prelude::*,
-    pulsating_between, px, relative, Animation, AnimationExt as _, App, Bounds, ClickEvent,
-    ClipboardItem, Context, Corner, Div, Entity, FocusHandle, FontWeight, KeyDownEvent, Keystroke,
+    linear_color_stop, linear_gradient, pulsating_between, px, relative, Animation, AnimationExt as _, App, Bounds, ClickEvent,
+    ClipboardItem, Context, Corner, Div, Entity, FocusHandle, FontWeight, Hsla, KeyDownEvent, Keystroke,
     ModifiersChangedEvent, MouseButton, PathBuilder, Pixels, SharedString, Stateful, Subscription,
     Window,
 };
@@ -96,6 +96,10 @@ const SHOWN: usize = 80;
 
 /// A comfortable typing speed, for the time-saved estimate.
 const TYPING_WPM: f32 = 40.;
+
+/// Shared height for the Chart and Heatmap bodies so switching views never shifts the page.
+const ACTIVITY_GRAPH_HEIGHT: f32 = 146.;
+const ACTIVITY_AXIS_HEIGHT: f32 = 15.;
 
 impl MainView {
     pub fn new(vox: Entity<Vox>, cx: &mut Context<Self>) -> Self {
@@ -1345,7 +1349,7 @@ impl MainView {
             .mb(px(-14.))
             .text_size(px(13.))
             .font_weight(FontWeight::SEMIBOLD)
-            .child(Icon::Layers.render(14., t.soft))
+            .child(Icon::Apps.render(14., t.soft))
             .child("Apps")
             .children(focused.map(|at| {
                 div()
@@ -1366,7 +1370,7 @@ impl MainView {
     /// Words a day over the last month, as bars. Returns the days shown.
     fn chart(&self, t: &Theme, inner: f32, now: u64, cx: &Context<Self>) -> (Div, u64) {
         const DAYS: u64 = 30;
-        const HEIGHT: f32 = 150.;
+        const HEIGHT: f32 = ACTIVITY_GRAPH_HEIGHT - ACTIVITY_AXIS_HEIGHT - 6.;
         let s = &self.vox.read(cx).stats;
         let today = local_noon(now);
         let days: Vec<(u64, usize)> = (0..DAYS)
@@ -1422,12 +1426,23 @@ impl MainView {
         }
         let label = |at: u64| div().text_size(px(11.)).text_color(t.faint).child(short_date(at));
         let axis = div()
+            .h(px(ACTIVITY_AXIS_HEIGHT))
             .flex()
+            .items_center()
             .justify_between()
             .child(label(days[0].0))
             .child(label(days[DAYS as usize / 2].0))
             .child(div().text_size(px(11.)).text_color(t.faint).child("Today"));
-        (div().flex().flex_col().gap(px(6.)).child(bars).child(axis), DAYS)
+        (
+            div()
+                .h(px(ACTIVITY_GRAPH_HEIGHT))
+                .flex()
+                .flex_col()
+                .justify_between()
+                .child(bars)
+                .child(axis),
+            DAYS,
+        )
     }
 
     /// Words a day as a grid of weeks, darker for busier days. Returns the
@@ -1458,7 +1473,12 @@ impl MainView {
             t.accent.opacity([0.3, 0.5, 0.75, 1.][level - 1])
         };
 
-        let mut months = div().flex().gap(px(GAP)).pl(px(LABELS));
+        let mut months = div()
+            .h(px(ACTIVITY_AXIS_HEIGHT))
+            .flex()
+            .items_center()
+            .gap(px(GAP))
+            .pl(px(LABELS));
         let mut last_month = None;
         for week in 0..weeks {
             // The month this column starts, named where it changes.
@@ -1539,6 +1559,7 @@ impl MainView {
         }
 
         let legend = div()
+            .h(px(ACTIVITY_AXIS_HEIGHT))
             .flex()
             .items_center()
             .justify_end()
@@ -1552,7 +1573,14 @@ impl MainView {
             }))
             .child(div().pl(px(3.)).child("More"));
         (
-            div().flex().flex_col().gap(px(6.)).child(months).child(grid).child(legend),
+            div()
+                .h(px(ACTIVITY_GRAPH_HEIGHT))
+                .flex()
+                .flex_col()
+                .justify_between()
+                .child(months)
+                .child(grid)
+                .child(legend),
             span,
         )
     }
@@ -2265,10 +2293,11 @@ impl MainView {
         };
         let custom_row = if self.recording_shortcut {
             let held = self.recorded_modifiers.symbols();
-            let cancel = click(cx.listener(|this, _: &ClickEvent, _, cx| {
+            let theme = *t;
+            let cancel = cx.listener(|this, _: &ClickEvent, _, cx| {
                 cx.stop_propagation();
                 this.stop_recording_shortcut(cx);
-            }));
+            });
             let prompt = if !held.is_empty() {
                 div()
                     .flex()
@@ -2283,23 +2312,50 @@ impl MainView {
                     .gap(px(10.))
                     .child(
                         div()
-                            .text_size(px(13.5))
+                            .text_size(px(13.))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(t.ink)
                             .child("Press a shortcut…"),
                     )
-                    .child(div().text_size(px(12.5)).text_color(t.faint).child("Esc to cancel"))
+                    .child(div().text_size(px(12.)).text_color(t.faint).child("Esc to cancel"))
             };
-            div().child(
+            let cancel_chip = div()
+                .flex()
+                .items_center()
+                .flex_shrink_0()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(hover_transition("cancel-record-shortcut", true, move |btn_hover, btn_press| {
+                    let hovered = hover_color(theme.surface, theme.sunken, btn_hover);
+                    let bg = hover_color(hovered, theme.line, btn_press);
+                    div()
+                        .id("cancel-record-shortcut")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .h(px(20.))
+                        .px(px(8.))
+                        .rounded(px(5.))
+                        .bg(bg)
+                        .border_1()
+                        .border_b_2()
+                        .border_color(theme.line)
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.ink)
+                        .cursor_pointer()
+                        .child("Cancel")
+                        .on_click(cancel)
+                }));
+            div().w_full().child(
                 div()
                     .id("shortcut-custom")
                     .track_focus(&self.recorder_focus)
+                    .w_full()
                     .flex()
                     .items_center()
-                    .justify_between()
                     .gap(px(14.))
                     .px(px(18.))
-                    .py(px(10.))
+                    .py(px(12.))
                     .bg(t.notice.opacity(0.65))
                     .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
                         let mods = ShortcutModifiers {
@@ -2321,45 +2377,36 @@ impl MainView {
                     }))
                     .child(
                         div()
+                            .size(px(16.))
+                            .flex_shrink_0()
                             .flex()
                             .items_center()
-                            .gap(px(14.))
+                            .justify_center()
                             .child(
                                 div()
-                                    .size(px(16.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        div()
-                                            .size(px(8.))
-                                            .rounded_full()
-                                            .bg(t.live)
-                                            .with_animation(
-                                                "recording-shortcut",
-                                                Animation::new(Duration::from_millis(900))
-                                                    .repeat()
-                                                    .with_easing(pulsating_between(0.35, 1.)),
-                                                |dot, delta| dot.opacity(delta),
-                                            ),
+                                    .size(px(8.))
+                                    .rounded_full()
+                                    .bg(t.live)
+                                    .with_animation(
+                                        "recording-shortcut",
+                                        Animation::new(Duration::from_millis(900))
+                                            .repeat()
+                                            .with_easing(pulsating_between(0.35, 1.)),
+                                        |dot, delta| dot.opacity(delta),
                                     ),
-                            )
-                            .child(prompt),
+                            ),
                     )
-                    .child(
-                        div()
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .child(button(t, "cancel-record-shortcut", "Cancel", false, cancel)),
-                    ),
+                    .child(prompt)
+                    .child(cancel_chip),
             )
         } else {
             let chosen = custom_shortcut.is_some_and(|custom| s.shortcut == custom);
             let theme = *t;
             let focus_handle = self.recorder_focus.clone();
-            let start_record = click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            let start_record = cx.listener(|this, _: &ClickEvent, window, cx| {
                 cx.stop_propagation();
                 this.start_recording_shortcut(window, cx);
-            }));
+            });
             let row_click = cx.listener(move |this, _: &ClickEvent, window, cx| {
                 if let Some(custom) = custom_shortcut {
                     if !chosen {
@@ -2371,17 +2418,62 @@ impl MainView {
                     this.start_recording_shortcut(window, cx);
                 }
             });
-            let button_label = if custom_shortcut.is_some() { "Change" } else { "Record" };
+            let button_label = if custom_shortcut.is_some() { "Re-record" } else { "Record" };
             let keys = custom_shortcut.map(Shortcut::keys);
-            div().child(hover_transition("shortcut-custom", true, move |hover, press| {
+            div().w_full().child(hover_transition("shortcut-custom", true, move |hover, press| {
                 let tint = hover_color(theme.sunken.opacity(hover), theme.line, press);
+                let record_button = div()
+                    .flex()
+                    .items_center()
+                    .flex_shrink_0()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(hover_transition("record-shortcut", true, move |btn_hover, btn_press| {
+                        let hovered = hover_color(theme.surface, theme.live, if theme.dark { 0.14 } else { 0.07 });
+                        let pressed = hover_color(theme.surface, theme.live, if theme.dark { 0.22 } else { 0.13 });
+                        let bg = hover_color(hover_color(theme.surface, hovered, btn_hover), pressed, btn_press);
+                        let border = hover_color(theme.line, theme.live.opacity(0.45), btn_hover);
+                        let ring = theme.live.opacity(0.45 + 0.4 * btn_hover);
+                        div()
+                            .id("record-shortcut")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap(px(5.))
+                            .flex_shrink_0()
+                            .h(px(20.))
+                            .px(px(7.))
+                            .rounded(px(5.))
+                            .bg(bg)
+                            .border_1()
+                            .border_b_2()
+                            .border_color(border)
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.ink)
+                            .cursor_pointer()
+                            .child(
+                                div()
+                                    .size(px(10.))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(ring)
+                                    .child(div().size(px(5.)).rounded_full().bg(theme.live)),
+                            )
+                            .child(button_label)
+                            .on_click(start_record)
+                    }));
                 let content = if let Some(keys) = &keys {
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(10.))
+                        .gap(px(8.))
                         .child(keycaps(&theme, keys, 12.))
                         .child(div().text_size(px(12.5)).text_color(theme.faint).child("Custom"))
+                        .child(record_button)
                 } else {
                     div()
                         .flex()
@@ -2389,54 +2481,39 @@ impl MainView {
                         .gap(px(8.))
                         .child(
                             div()
-                                .text_size(px(13.5))
+                                .text_size(px(13.))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.ink)
                                 .child("Custom"),
                         )
-                        .child(
-                            div()
-                                .text_size(px(12.5))
-                                .text_color(theme.faint)
-                                .child("Record your own"),
-                        )
+                        .child(record_button)
                 };
                 div()
                     .id("shortcut-custom")
                     .track_focus(&focus_handle)
+                    .w_full()
                     .flex()
                     .items_center()
-                    .justify_between()
                     .gap(px(14.))
                     .px(px(18.))
-                    .py(px(10.))
+                    .py(px(12.))
                     .bg(tint)
                     .cursor_pointer()
                     .child(
                         div()
+                            .size(px(16.))
+                            .flex_shrink_0()
                             .flex()
                             .items_center()
-                            .gap(px(14.))
-                            .child(
-                                div()
-                                    .size(px(16.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_full()
-                                    .border_1()
-                                    .border_color(if chosen { theme.accent } else { theme.faint })
-                                    .when(chosen, |d| {
-                                        d.child(div().size(px(8.)).rounded_full().bg(theme.accent))
-                                    }),
-                            )
-                            .child(content),
+                            .justify_center()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(if chosen { theme.accent } else { theme.faint })
+                            .when(chosen, |d| {
+                                d.child(div().size(px(8.)).rounded_full().bg(theme.accent))
+                            }),
                     )
-                    .child(
-                        div()
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .child(button(&theme, "record-shortcut", button_label, false, start_record)),
-                    )
+                    .child(content)
                     .on_click(row_click)
             }))
         };
@@ -2569,22 +2646,39 @@ impl Render for MainView {
             Tab::Engine => self.engine(&t, cx),
             Tab::Settings => self.settings(&t, cx),
         };
+        // Opaque, so the fade under the tab bar (the same colour painted
+        // again) blends in rather than reading lighter than the bar.
+        let bg = Hsla { a: 1., ..t.bg };
         div()
             .relative()
             .size_full()
             .flex()
             .flex_col()
-            .bg(t.bg)
+            .bg(bg)
             .text_color(t.ink)
             .text_size(px(14.))
             .child(self.top_bar(&t, cx))
             .child(
                 div()
-                    .id("page")
+                    .relative()
                     .flex_1()
                     .min_h(px(0.))
-                    .overflow_y_scroll()
-                    .child(page),
+                    .child(div().id("page").size_full().overflow_y_scroll().child(page))
+                    // Fades the page out under the tab bar rather than
+                    // cutting it off at a hard edge.
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .right_0()
+                            .h(px(28.))
+                            .bg(linear_gradient(
+                                180.,
+                                linear_color_stop(bg, 0.),
+                                linear_color_stop(bg.opacity(0.), 1.),
+                            )),
+                    ),
             )
             .children(self.vox.read(cx).key_notice.clone().map(|message| self.key_toast(&t, message)))
     }

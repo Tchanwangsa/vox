@@ -274,8 +274,19 @@ fn runtime_error(error: std::io::Error) -> String {
     "Cohere couldn't transcribe. Try again.".into()
 }
 
-pub(super) fn hear(process: Process, wav: &[u8], stage: &Arc<AtomicU8>) -> Result<String, String> {
-    let output = process.transcribe(wav, stage).map_err(runtime_error)?;
+pub(super) fn hear(
+    process: Process,
+    wav: &[u8],
+    stage: &Arc<AtomicU8>,
+    cancel: &AtomicBool,
+) -> Result<String, String> {
+    let output = process.transcribe(wav, stage, cancel).map_err(|e| {
+        if cancel.load(Ordering::Relaxed) {
+            "Cancelled".into()
+        } else {
+            runtime_error(e)
+        }
+    })?;
     if output.status.success() {
         let last_line = String::from_utf8_lossy(&output.stdout);
         if let Some(text) = last_line

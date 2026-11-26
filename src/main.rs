@@ -162,7 +162,8 @@ fn hear_file(args: &[String]) -> Result<(), String> {
     let local = engines::Local::discover();
     let started = std::time::Instant::now();
     let stage = Arc::new(AtomicU8::new(engines::HEARING));
-    let outcome = engines::run(&settings, &local, &wav, &stage, false, None).outcome;
+    let cancel = AtomicBool::new(false);
+    let outcome = engines::run(&settings, &local, &wav, &stage, &cancel, false, None).outcome;
     engines::s1::stop();
     let outcome = outcome?;
     eprintln!("heard by {} on {} in {} ms", outcome.heard_model, outcome.avenue.label(), started.elapsed().as_millis());

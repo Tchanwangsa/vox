@@ -1,15 +1,18 @@
 <div align="center">
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/banner-dark.svg">
-  <img src=".github/assets/banner-light.svg" alt="Vox" width="720">
-</picture>
+<a href="https://usevox.vercel.app">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/banner-dark.svg">
+    <img src=".github/assets/banner-light.svg" alt="Vox" width="720">
+  </picture>
+</a>
 
 <p>Hold a shortcut, speak, and type cleaned-up words into whichever app is in front.</p>
 
 <p>
   <a href="https://github.com/Tchanwangsa/vox/releases/latest"><img alt="Download for macOS" src="https://img.shields.io/github/v/release/Tchanwangsa/vox?label=Download%20for%20macOS&style=for-the-badge&logo=apple&logoColor=white&labelColor=14161d&color=e05341"></a>&nbsp;
-  <a href="#install"><img alt="Install guide" src="https://img.shields.io/badge/Install_Guide-14161d?style=for-the-badge"></a>
+  <a href="#install"><img alt="Install guide" src="https://img.shields.io/badge/Install_Guide-14161d?style=for-the-badge"></a>&nbsp;
+  <a href="https://usevox.vercel.app"><img alt="Website" src="https://img.shields.io/badge/Website-14161d?style=for-the-badge"></a>
 </p>
 
 <p>
@@ -26,6 +29,8 @@
 A macOS dictation app in Rust and [GPUI](https://www.gpui.rs), with local and Groq transcription. A floating pill shows live audio levels while you speak, transcribes the clip, cleans up fillers and punctuation, and pastes the result into the active app.
 
 macOS only for now — Windows support may come later.
+
+See it in action at **[usevox.vercel.app](https://usevox.vercel.app)**.
 
 ## What it does
 
@@ -97,6 +102,19 @@ App data, models, history, stats, and recordings live in `~/Library/Application 
 | `src/hotkey.rs`, `src/paste.rs`, `src/keys.rs` | Global shortcuts, pasting into the front app, and Keychain |
 | `src/ui/` | Main window (Home, Stats, Engine, Settings) and floating pill |
 | `scripts/` | App bundle, code signing, release packaging, and icon generation |
+| `site/` | The website at [usevox.vercel.app](https://usevox.vercel.app), built with SolidJS and Vite |
+
+### Website
+
+The site is a static SolidJS page in `site/`. Its words live in `site/src/copy.ts`.
+
+```sh
+cd site
+pnpm install
+pnpm dev                             # preview at localhost:5173
+pnpm build                           # static output in site/dist
+vercel deploy --prod                 # publish to usevox.vercel.app
+```
 
 ## License & third-party notices
 

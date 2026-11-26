@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use super::speech::Process;
 
@@ -67,11 +67,19 @@ pub(super) fn start(
 }
 
 impl Request {
-    pub(super) fn hear(self, wav: &[u8], stage: &Arc<AtomicU8>) -> Result<String, String> {
-        let output = self
-            .process
-            .transcribe(wav, stage)
-            .map_err(|e| transcription_error(e.to_string()))?;
+    pub(super) fn hear(
+        self,
+        wav: &[u8],
+        stage: &Arc<AtomicU8>,
+        cancel: &AtomicBool,
+    ) -> Result<String, String> {
+        let output = self.process.transcribe(wav, stage, cancel).map_err(|e| {
+            if cancel.load(Ordering::Relaxed) {
+                "Cancelled".into()
+            } else {
+                transcription_error(e.to_string())
+            }
+        })?;
         // whisper-cli can exit successfully without a JSON file on bad input.
         if output.status.success()
             && let Ok(reply) = std::fs::read(&self.output.0)

@@ -107,6 +107,7 @@ pub struct Vox {
     target_app: Option<apps::Front>,
     recorder: Option<Recorder>,
     preload: Option<engines::Preload>,
+    work_cancel: Option<Arc<AtomicBool>>,
     pressed_at: Instant,
     hotkeys: Option<Hotkeys>,
     /// Counts dictations, so a cancelled one's late result is dropped.
@@ -234,6 +235,7 @@ impl Vox {
             target_app: None,
             recorder: None,
             preload: None,
+            work_cancel: None,
             pressed_at: Instant::now(),
             hotkeys,
             run: 0,
@@ -381,6 +383,10 @@ impl Vox {
 
         let (settings, local, stage, run) =
             (self.settings.clone(), self.local.clone(), self.stage.clone(), self.run);
+        let cancel = Arc::new(AtomicBool::new(false));
+        if let Some(previous) = self.work_cancel.replace(cancel.clone()) {
+            previous.store(true, Ordering::Relaxed);
+        }
         let preload = self.preload.take();
         let key_revision = self.groq_key_revision;
         let key_rejected = matches!(self.groq, GroqKey::Rejected(_));
@@ -388,8 +394,15 @@ impl Vox {
             let seconds = clip.seconds;
             let (dictation, wav) = cx
                 .background_spawn(async move {
-                    let dictation =
-                        engines::run(&settings, &local, &clip.wav, &stage, key_rejected, preload);
+                    let dictation = engines::run(
+                        &settings,
+                        &local,
+                        &clip.wav,
+                        &stage,
+                        &cancel,
+                        key_rejected,
+                        preload,
+                    );
                     (dictation, clip.wav)
                 })
                 .await;
@@ -411,6 +424,7 @@ impl Vox {
         if run != self.run {
             return;
         }
+        self.work_cancel = None;
         let same_key = key_revision == self.groq_key_revision;
         let groq_key_rejected = same_key && dictation.groq_key_rejected;
         if groq_key_rejected && let GroqKey::Saved(masked) = &self.groq {
@@ -537,6 +551,9 @@ impl Vox {
     fn cancel(&mut self, cx: &mut Context<Self>) {
         self.recorder = None;
         self.run += 1;
+        if let Some(cancel) = self.work_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
         self.rest(cx);
     }
 
@@ -653,7 +670,7 @@ impl Vox {
 
     /// Pause or resume the global talk shortcut while the user records a new one.
     pub fn set_shortcut_recording(&mut self, recording: bool, cx: &mut Context<Self>) {
-        if recording && matches!(self.phase, Phase::Listening { .. }) {
+        if recording && matches!(self.phase, Phase::Listening { .. } | Phase::Working) {
             self.cancel(cx);
         }
         let Some(hotkeys) = self.hotkeys.as_mut() else {

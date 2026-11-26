@@ -24,7 +24,8 @@ pub struct Hotkeys {
     talk_on: bool,
     /// True while the user is recording a new custom shortcut in Settings.
     paused: bool,
-    escape: HotKey,
+    /// Escape chords currently registered (bare Escape plus subsets of `talk`'s modifiers).
+    active_escapes: Vec<HotKey>,
     escape_on: bool,
     enter: HotKey,
     enter_on: bool,
@@ -139,6 +140,37 @@ pub fn hotkey(shortcut: Shortcut) -> HotKey {
     HotKey::new(modifiers(shortcut.modifiers), code(shortcut.key))
 }
 
+/// Escape chords to register while a dictation is running: bare Escape plus
+/// Escape combined with any subset of the talk shortcut's modifiers, so
+/// pressing Escape cancels in hold-to-talk mode even while the talk modifiers
+/// are still held. Excludes `talk` itself if the user chose an Escape shortcut.
+fn escape_hotkeys(talk: HotKey) -> Vec<HotKey> {
+    let bits: Vec<Modifiers> = [
+        Modifiers::CONTROL,
+        Modifiers::ALT,
+        Modifiers::SHIFT,
+        Modifiers::META,
+    ]
+    .into_iter()
+    .filter(|m| talk.mods.contains(*m))
+    .collect();
+
+    let mut out = Vec::with_capacity(1 << bits.len());
+    for mask in 0..(1usize << bits.len()) {
+        let mut mods = Modifiers::empty();
+        for (i, &bit) in bits.iter().enumerate() {
+            if (mask & (1 << i)) != 0 {
+                mods |= bit;
+            }
+        }
+        let hk = HotKey::new((!mods.is_empty()).then_some(mods), Code::Escape);
+        if hk != talk {
+            out.push(hk);
+        }
+    }
+    out
+}
+
 impl Hotkeys {
     /// Must be made on the main thread. The receiver yields raw events for as
     /// long as the app runs; [`Hotkeys::taken`] says whether the shortcut is ours.
@@ -155,7 +187,7 @@ impl Hotkeys {
             talk,
             talk_on,
             paused: false,
-            escape: HotKey::new(None, Code::Escape),
+            active_escapes: Vec::new(),
             escape_on: false,
             enter: HotKey::new(None, Code::Enter),
             enter_on: false,
@@ -199,7 +231,7 @@ impl Hotkeys {
             Some(if pressed { Press::Down } else { Press::Up })
         } else if (id == self.enter.id() || id == self.numpad_enter.id()) && pressed {
             Some(Press::Finish)
-        } else if id == self.escape.id() && pressed {
+        } else if pressed && self.active_escapes.iter().any(|hk| hk.id() == id) {
             Some(Press::Cancel)
         } else {
             None
@@ -211,28 +243,44 @@ impl Hotkeys {
         if !self.paused && next == self.talk && self.talk_on {
             return Ok(());
         }
-        self.manager.register(next).map_err(|e| e.to_string())?;
+        let was_escaping = self.escape_on;
+        if was_escaping {
+            self.listen_for_escape(false);
+        }
+        if let Err(e) = self.manager.register(next) {
+            if was_escaping {
+                self.listen_for_escape(true);
+            }
+            return Err(e.to_string());
+        }
         if self.talk_on {
             self.manager.unregister(self.talk).ok();
         }
         self.talk = next;
         self.talk_on = true;
         self.paused = false;
+        if was_escaping {
+            self.listen_for_escape(true);
+        }
         Ok(())
     }
 
-    /// Take or give back Escape.
+    /// Take or give back Escape (bare and with any subset of `talk`'s modifiers).
     pub fn listen_for_escape(&mut self, on: bool) {
         if on == self.escape_on {
             return;
         }
-        let done = if on {
-            self.manager.register(self.escape)
+        self.escape_on = on;
+        if on {
+            for hk in escape_hotkeys(self.talk) {
+                if self.manager.register(hk).is_ok() {
+                    self.active_escapes.push(hk);
+                }
+            }
         } else {
-            self.manager.unregister(self.escape)
-        };
-        if done.is_ok() {
-            self.escape_on = on;
+            for hk in self.active_escapes.drain(..) {
+                self.manager.unregister(hk).ok();
+            }
         }
     }
 
@@ -274,5 +322,26 @@ mod tests {
             let hk = hotkey(Shortcut::new(ShortcutModifiers::ALT, key));
             assert!(ids.insert(hk.id()), "duplicate hotkey id for {key:?}");
         }
+    }
+
+    #[test]
+    fn escape_chords_cover_talk_modifier_subsets_without_colliding_with_talk() {
+        let ctrl_opt_space = hotkey(Shortcut::CTRL_OPT_SPACE);
+        let chords = escape_hotkeys(ctrl_opt_space);
+        assert_eq!(
+            chords,
+            vec![
+                HotKey::new(None, Code::Escape),
+                HotKey::new(Some(Modifiers::CONTROL), Code::Escape),
+                HotKey::new(Some(Modifiers::ALT), Code::Escape),
+                HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::Escape),
+            ]
+        );
+
+        let f5 = hotkey(Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::F5));
+        assert_eq!(escape_hotkeys(f5), vec![HotKey::new(None, Code::Escape)]);
+
+        let opt_esc = hotkey(Shortcut::new(ShortcutModifiers::ALT, ShortcutKey::Escape));
+        assert_eq!(escape_hotkeys(opt_esc), vec![HotKey::new(None, Code::Escape)]);
     }
 }
