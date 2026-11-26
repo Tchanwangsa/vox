@@ -102,19 +102,10 @@ App data, models, history, stats, and recordings live in `~/Library/Application 
 | `src/hotkey.rs`, `src/paste.rs`, `src/keys.rs` | Global shortcuts, pasting into the front app, and Keychain |
 | `src/ui/` | Main window (Home, Stats, Engine, Settings) and floating pill |
 | `scripts/` | App bundle, code signing, release packaging, and icon generation |
-| `site/` | The website at [usevox.vercel.app](https://usevox.vercel.app), built with SolidJS and Vite |
 
 ### Website
 
-The site is a static SolidJS page in `site/`. Its words live in `site/src/copy.ts`.
-
-```sh
-cd site
-pnpm install
-pnpm dev                             # preview at localhost:5173
-pnpm build                           # static output in site/dist
-vercel deploy --prod                 # publish to usevox.vercel.app
-```
+The site at [usevox.vercel.app](https://usevox.vercel.app) lives in its own repo, [vox-site](https://github.com/Tchanwangsa/vox-site).
 
 ## License & third-party notices
 
